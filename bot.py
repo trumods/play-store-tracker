@@ -2,14 +2,16 @@ import os
 import re
 import json
 import time
+import threading
 import requests
 from datetime import datetime as dt
+from flask import Flask
 import telebot
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from google_play_scraper import app
 
-# --- CONFIGURATION (Render cloud se auto-pick hoga) ---
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8743452324:AAGzQiScYTZ2VAd2lHt-rQnoIVhQwjLks1o")
+# --- CONFIGURATION ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 
@@ -31,9 +33,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 
 # --- UPSTASH CLOUD DATABASE CONNECTIVITY ---
 def load_database():
-    if not UPSTASH_URL or not UPSTASH_TOKEN:
-        print("⚠️ Warning: Upstash Credentials missing cloud me!")
-        return {}
+    if not UPSTASH_URL or not UPSTASH_TOKEN: return {}
     headers = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
     try:
         r = requests.get(f"{UPSTASH_URL}/get/play_tracker_data", headers=headers)
@@ -45,8 +45,7 @@ def load_database():
                 if 'dates' not in info: info['dates'] = {}
                 if 'history' not in info: info['history'] = {}
             return data
-    except Exception as e:
-        print(f"Upstash Load Error: {e}")
+    except Exception as e: print(f"Upstash Load Error: {e}")
     return {}
 
 def save_database(data):
@@ -56,9 +55,8 @@ def save_database(data):
         payload = json.dumps(data)
         r = requests.post(f"{UPSTASH_URL}/set/play_tracker_data", data=payload, headers=headers)
         return r.json().get("result") == "OK"
-    except Exception as e:
-        print(f"Upstash Save Error: {e}")
-        return False
+    except Exception as e: print(f"Upstash Save Error: {e}")
+    return False
 
 def format_date(timestamp):
     if not timestamp or timestamp == 0: return "Unknown Date"
@@ -94,9 +92,7 @@ def handle_menu_options(message):
         bot.register_next_step_handler(msg, process_add_app)
 
     elif text == "📋 View Tracked Apps":
-        if not data:
-            bot.send_message(chat_id, "📭 Aapki list khali hai!")
-            return
+        if not data: return bot.send_message(chat_id, "📭 Aapki list khali hai!")
         for pkg, info in data.items():
             msg_txt = f"📦 *{info.get('name')}*\n🆔 `{pkg}`\n🇮🇳 Version: `{info.get('versions', {}).get('in', 'N/A')}` (📅 {format_date(info.get('dates', {}).get('in', 0))})"
             hist = info.get('history', {})
@@ -107,20 +103,15 @@ def handle_menu_options(message):
             bot.send_message(chat_id, msg_txt, parse_mode="Markdown")
 
     elif text == "🗑️ Delete App":
-        if not data:
-            bot.send_message(chat_id, "📭 List pehle se khali hai!")
-            return
+        if not data: return bot.send_message(chat_id, "📭 List pehle se khali hai!")
         msg_txt = "🗑️ *DELETE APP*\n\nKaun si app delete karni hai? Number type karke bhejein:\n"
         keys = list(data.keys())
-        for i, pkg in enumerate(keys):
-            msg_txt += f"\n{i+1}. {data[pkg].get('name')}"
+        for i, pkg in enumerate(keys): msg_txt += f"\n{i+1}. {data[pkg].get('name')}"
         msg = bot.send_message(chat_id, msg_txt, parse_mode="Markdown")
         bot.register_next_step_handler(msg, lambda m: process_delete_app(m, keys))
 
     elif text == "🇮🇳 Standard Check":
-        if not data:
-            bot.send_message(chat_id, "📭 List khali hai! Pehle app add karein.")
-            return
+        if not data: return bot.send_message(chat_id, "📭 List khali hai! Pehle app add karein.")
         status = bot.send_message(chat_id, "⏳ India Region check ho raha hai...")
         found_any = False
         for pkg, info in data.items():
@@ -133,18 +124,13 @@ def handle_menu_options(message):
                 
                 if (live_v != old_v and live_v != 'Varies with device' and old_v != 'Unknown') or (live_d > old_d and old_d != 0):
                     found_any = True
-                    alert = (f"🔴 *🚨 [NAYA UPDATE DETECTED!] 🚨*\n\n"
-                             f"📦 *{info.get('name')}*\n"
-                             f"🔄 Version: `{old_v}` ➡️ `{live_v}`\n"
-                             f"📅 Date: `{format_date(old_d)}` ➡️ `{format_date(live_d)}`")
+                    alert = (f"🔴 *🚨 [NAYA UPDATE DETECTED!] 🚨*\n\n📦 *{info.get('name')}*\n🔄 Version: `{old_v}` ➡️ `{live_v}`\n📅 Date: `{format_date(old_d)}` ➡️ `{format_date(live_d)}`")
                     bot.send_message(chat_id, alert, parse_mode="Markdown")
-                    
                     if 'history' not in data[pkg]: data[pkg]['history'] = {}
                     data[pkg]['history']['in'] = {'old_version': old_v, 'old_date': old_d}
                     data[pkg]['versions']['in'], data[pkg]['dates']['in'] = live_v, live_d
             except: pass
-        if not found_any:
-            bot.send_message(chat_id, "🟢 India me koi naya update nahi mila.")
+        if not found_any: bot.send_message(chat_id, "🟢 India me koi naya update nahi mila.")
         save_database(data)
         bot.delete_message(chat_id, status.message_id)
 
@@ -169,14 +155,9 @@ def process_add_app(message):
     match = re.search(r'id=([a-zA-Z0-9._]+)', link)
     pkg = match.group(1) if match else link if re.match(r'^[a-zA-Z0-9]+(\.[a-zA-Z0-9]+)+$', link) else None
     
-    if not pkg:
-        bot.send_message(message.chat.id, "❌ Galat Package ID!")
-        return
-    
+    if not pkg: return bot.send_message(message.chat.id, "❌ Galat Package ID!")
     data = load_database()
-    if pkg in data:
-        bot.send_message(message.chat.id, "⚠️ Ye app pehle se tracked hai!")
-        return
+    if pkg in data: return bot.send_message(message.chat.id, "⚠️ Ye app pehle se tracked hai!")
         
     status = bot.send_message(message.chat.id, "🔍 Play Store se data nikal raha hoon...")
     try:
@@ -193,8 +174,7 @@ def process_add_app(message):
                 data[pkg]['dates'][c_code] = 0
         save_database(data)
         bot.edit_message_text(f"🎉 *Successfully Added:*\n📦 {app_name}\n🆔 `{pkg}`", message.chat.id, status.message_id, parse_mode="Markdown")
-    except:
-        bot.edit_message_text("❌ App nahi mila! Kripya sahi link/ID bhejein.", message.chat.id, status.message_id)
+    except: bot.edit_message_text("❌ App nahi mila! Kripya sahi link/ID bhejein.", message.chat.id, status.message_id)
 
 def process_delete_app(message, keys):
     try:
@@ -213,17 +193,13 @@ def process_multi_scan(message, keys, mode="broadcast"):
     data = load_database()
     target_apps = []
     
-    if mode == "broadcast" and input_text.upper() == "ALL":
-        target_apps = keys
+    if mode == "broadcast" and input_text.upper() == "ALL": target_apps = keys
     else:
         nums = [int(x) for x in re.findall(r'\d+', input_text)]
         for num in nums:
             if 1 <= num <= len(keys): target_apps.append(keys[num - 1])
             
-    if not target_apps:
-        bot.send_message(message.chat.id, "❌ Koi valid app select nahi hui!")
-        return
-
+    if not target_apps: return bot.send_message(message.chat.id, "❌ Koi valid app select nahi hui!")
     status = bot.send_message(message.chat.id, f"🚀 Scanning {len(target_apps)} App(s)... Kripya thoda wait karein.")
 
     for pkg in target_apps:
@@ -273,14 +249,29 @@ def process_multi_scan(message, keys, mode="broadcast"):
                 c_str = ", ".join(countries[:12]) + ("..." if len(countries) > 12 else "")
                 if i == 0 and len(sorted_res) > 1:
                     report += f"\n\n🔴 *🚨 LATEST HIDDEN UPDATE DETECTED!*\n🔄 Version : `{v}`\n📅 Date    : `{format_date(d)}`\n🌍 Regions : {c_str}"
-                else:
-                    report += f"\n\n🟢 Version : `{v}`\n📅 Date    : `{format_date(d)}`\n🌍 Regions : {c_str}"
+                else: report += f"\n\n🟢 Version : `{v}`\n📅 Date    : `{format_date(d)}`\n🌍 Regions : {c_str}"
             bot.send_message(message.chat.id, report, parse_mode="Markdown")
             
     save_database(data)
     bot.delete_message(message.chat.id, status.message_id)
     bot.send_message(message.chat.id, "✅ *Scanning Complete!* Data saved to Upstash Cloud.", parse_mode="Markdown")
 
-if __name__ == "__main__":
+
+# --- FAKE WEB SERVER (RENDER FREE TIER BYPASS) ---
+server = Flask(__name__)
+
+@server.route('/')
+def home():
+    return "Bot is Alive and Running on Render Cloud!"
+
+def run_bot():
     print("🚀 Cloud Telegram Bot Starting...")
     bot.infinity_polling()
+
+if __name__ == "__main__":
+    # 1. Telegram bot ko background me start karein
+    threading.Thread(target=run_bot).start()
+    
+    # 2. Render ki requirement poori karne ke liye Web Server start karein
+    port = int(os.environ.get("PORT", 5000))
+    server.run(host="0.0.0.0", port=port)
